@@ -1,0 +1,23 @@
+services:
+  podcast-backend:
+    build:
+      context: ./backend
+    container_name: podcast-backend
+    environment:
+      PODCAST_BACKEND_ADDR: 0.0.0.0:8787
+      PODCAST_BACKEND_DATA: /app/data/app_state.json
+      RUST_LOG: podcast_backend=info,tower_http=info
+    ports:
+      - "8787:8787"
+    volumes:
+      - podcast_backend_data:/app/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8787/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+
+volumes:
+  podcast_backend_data:
