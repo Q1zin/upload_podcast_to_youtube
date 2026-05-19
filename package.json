@@ -5,9 +5,17 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:local": "VITE_BACKEND_TARGET=local vite",
+    "dev:server": "VITE_BACKEND_TARGET=server vite",
     "build": "vue-tsc --noEmit && vite build",
+    "build:local": "VITE_BACKEND_TARGET=local vue-tsc --noEmit && VITE_BACKEND_TARGET=local vite build",
+    "build:server": "VITE_BACKEND_TARGET=server vue-tsc --noEmit && VITE_BACKEND_TARGET=server vite build",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "tauri:dev:local": "VITE_BACKEND_TARGET=local tauri dev",
+    "tauri:dev:server": "VITE_BACKEND_TARGET=server tauri dev",
+    "tauri:build:local": "VITE_BACKEND_TARGET=local tauri build",
+    "tauri:build:server": "VITE_BACKEND_TARGET=server tauri build"
   },
   "dependencies": {
     "vue": "^3.5.13",

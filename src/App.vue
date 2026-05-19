@@ -68,7 +68,13 @@ const languages = [
 
 const audioExt = ["wav", "mp3", "aac", "aiff", "mp4", "m4a", "flac", "ogg", "mkv"];
 const maxAudio = 2 * 1024 * 1024 * 1024;
-const apiBase = import.meta.env.VITE_BACKEND_URL ?? "http://127.0.0.1:8787";
+const backendTargets = {
+  local: "http://127.0.0.1:8787",
+  server: import.meta.env.VITE_BACKEND_SERVER_URL ?? "http://31.130.132.238",
+} as const;
+const backendTarget = (import.meta.env.VITE_BACKEND_TARGET ?? "local") as keyof typeof backendTargets;
+const apiBase =
+  import.meta.env.VITE_BACKEND_URL ?? backendTargets[backendTarget] ?? backendTargets.local;
 
 const profile = reactive<Profile>({
   name: "",
@@ -126,7 +132,7 @@ const youtubePodcast = computed(() =>
 
 const rssUrl = computed(() =>
   selectedPodcast.value?.data.feedSlug
-    ? `https://q1zin.ru/podcast/${selectedPodcast.value.data.feedSlug}`
+    ? `${apiBase}/podcast/${selectedPodcast.value.data.feedSlug}`
     : "",
 );
 
