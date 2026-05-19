@@ -20,7 +20,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|_| "127.0.0.1:8787".to_string())
         .parse::<SocketAddr>()?;
 
-    let store = Store::load(data_path).await?;
+    let resources_path = env::var_os("PODCAST_BACKEND_RESOURCES")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("resurs"));
+    let public_base_url =
+        env::var("PODCAST_PUBLIC_BASE_URL").unwrap_or_else(|_| format!("http://{bind_addr}"));
+
+    let store = Store::load_with_resources(data_path, resources_path, public_base_url).await?;
     let listener = tokio::net::TcpListener::bind(bind_addr).await?;
 
     tracing::info!("backend listening on http://{bind_addr}");

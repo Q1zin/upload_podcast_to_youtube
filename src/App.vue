@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, reactive, ref } from "vue";
+import { computed, onMounted, reactive, ref } from "vue";
 
 type PodcastData = {
   title: string;
@@ -27,6 +27,17 @@ type PodcastEntry = {
   id: string;
   data: PodcastData;
   episodes: Episode[];
+};
+
+type AppDocument = {
+  revision: number;
+  profile: Profile;
+  podcasts: PodcastEntry[];
+};
+
+type Profile = {
+  name: string;
+  email: string;
 };
 
 type Selection =
@@ -57,15 +68,12 @@ const languages = [
 
 const audioExt = ["wav", "mp3", "aac", "aiff", "mp4", "m4a", "flac", "ogg", "mkv"];
 const maxAudio = 2 * 1024 * 1024 * 1024;
+const apiBase = import.meta.env.VITE_BACKEND_URL ?? "http://127.0.0.1:8787";
 
-const profile = reactive({
+const profile = reactive<Profile>({
   name: "",
   email: "",
 });
-
-function createId() {
-  return crypto.randomUUID();
-}
 
 function emptyPodcast(): PodcastData {
   return {
@@ -80,35 +88,16 @@ function emptyPodcast(): PodcastData {
   };
 }
 
-function emptyEpisode(number: number): Episode {
-  return {
-    id: createId(),
-    audioFileName: null,
-    audioSize: 0,
-    title: "",
-    notes: "",
-    type: "Full",
-    number,
-    cover: null,
-  };
-}
-
-function initialPodcast(): PodcastEntry {
-  return {
-    id: createId(),
-    data: emptyPodcast(),
-    episodes: [emptyEpisode(1)],
-  };
-}
-
-const firstPodcast = initialPodcast();
-const podcasts = ref<PodcastEntry[]>([firstPodcast]);
-const selection = ref<Selection | null>({ kind: "podcast", podcastId: firstPodcast.id });
-const expanded = ref<Record<string, boolean>>({ [firstPodcast.id]: true });
+const podcasts = ref<PodcastEntry[]>([]);
+const selection = ref<Selection | null>(null);
+const expanded = ref<Record<string, boolean>>({});
 const youtubeFor = ref<string | null>(null);
 const toast = ref("");
 const coverError = ref("");
 const audioError = ref("");
+const revision = ref(0);
+const isLoading = ref(true);
+const isSaving = ref(false);
 const savedProfileSnapshot = ref("");
 const savedPodcastSnapshots = ref<Record<string, string>>({});
 const savedEpisodeSnapshots = ref<Record<string, string>>({});
@@ -156,16 +145,151 @@ function showToast(message: string) {
   }, 2400);
 }
 
+async function apiRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const headers = new Headers(init.headers);
+  if (init.body && !(init.body instanceof FormData) && !headers.has("content-type")) {
+    headers.set("content-type", "application/json");
+  }
+
+  const response = await fetch(`${apiBase}${path}`, {
+    ...init,
+    headers,
+  });
+
+  if (!response.ok) {
+    let message = `Backend request failed: ${response.status}`;
+    try {
+      const body = (await response.json()) as { error?: string };
+      message = body.error ?? message;
+    } catch {
+      // Keep the status based message when the response has no JSON body.
+    }
+    throw new Error(message);
+  }
+
+  return (await response.json()) as T;
+}
+
+async function uploadFile<T>(path: string, file: File): Promise<T> {
+  const formData = new FormData();
+  formData.append("file", file);
+  return apiRequest<T>(path, {
+    method: "PUT",
+    body: formData,
+  });
+}
+
+async function withBackend<T>(action: () => Promise<T>, successMessage: string) {
+  isSaving.value = true;
+  try {
+    const result = await action();
+    showToast(successMessage);
+    return result;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Backend request failed";
+    showToast(message);
+    console.error(error);
+    return null;
+  } finally {
+    isSaving.value = false;
+  }
+}
+
+function applyDocument(document: AppDocument, nextSelection?: Selection | null) {
+  revision.value = document.revision;
+  profile.name = document.profile.name;
+  profile.email = document.profile.email;
+  podcasts.value = document.podcasts;
+  savedProfileSnapshot.value = getProfileSnapshot();
+  syncAllSnapshots();
+
+  const requestedSelection = nextSelection ?? selection.value;
+  if (requestedSelection && selectionExists(requestedSelection)) {
+    selection.value = requestedSelection;
+    return;
+  }
+
+  const firstPodcast = podcasts.value[0] ?? null;
+  selection.value = firstPodcast ? { kind: "podcast", podcastId: firstPodcast.id } : null;
+}
+
+function syncAllSnapshots() {
+  const podcastSnapshots: Record<string, string> = {};
+  const episodeSnapshots: Record<string, string> = {};
+
+  for (const podcast of podcasts.value) {
+    podcastSnapshots[podcast.id] = getPodcastSnapshot(podcast);
+    expanded.value[podcast.id] = expanded.value[podcast.id] ?? true;
+    for (const episode of podcast.episodes) {
+      episodeSnapshots[episode.id] = getEpisodeSnapshot(episode);
+    }
+  }
+
+  savedPodcastSnapshots.value = podcastSnapshots;
+  savedEpisodeSnapshots.value = episodeSnapshots;
+}
+
+function selectionExists(candidate: Selection) {
+  const podcast = podcasts.value.find((item) => item.id === candidate.podcastId);
+  if (!podcast) return false;
+  return (
+    candidate.kind === "podcast" ||
+    podcast.episodes.some((episode) => episode.id === candidate.episodeId)
+  );
+}
+
+function replacePodcast(next: PodcastEntry) {
+  const index = podcasts.value.findIndex((podcast) => podcast.id === next.id);
+  if (index === -1) {
+    podcasts.value.push(next);
+  } else {
+    podcasts.value[index] = next;
+  }
+
+  expanded.value[next.id] = expanded.value[next.id] ?? true;
+  savedPodcastSnapshots.value[next.id] = getPodcastSnapshot(next);
+  for (const episode of next.episodes) {
+    savedEpisodeSnapshots.value[episode.id] = getEpisodeSnapshot(episode);
+  }
+}
+
+function replaceEpisode(podcastId: string, next: Episode) {
+  const podcast = podcasts.value.find((item) => item.id === podcastId);
+  if (!podcast) return;
+
+  const index = podcast.episodes.findIndex((episode) => episode.id === next.id);
+  if (index === -1) {
+    podcast.episodes.push(next);
+  } else {
+    podcast.episodes[index] = next;
+  }
+  savedEpisodeSnapshots.value[next.id] = getEpisodeSnapshot(next);
+}
+
+async function loadState() {
+  isLoading.value = true;
+  try {
+    const document = await apiRequest<AppDocument>("/api/state");
+    applyDocument(document);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to load backend state";
+    showToast(message);
+    console.error(error);
+  } finally {
+    isLoading.value = false;
+  }
+}
+
 function getProfileSnapshot() {
   return JSON.stringify({ name: profile.name, email: profile.email });
 }
 
 function getPodcastSnapshot(podcast: PodcastEntry) {
-  return JSON.stringify(podcast.data);
+  return JSON.stringify(cleanPodcastData(podcast.data));
 }
 
 function getEpisodeSnapshot(episode: Episode) {
-  return JSON.stringify(episode);
+  return JSON.stringify(cleanEpisode(episode));
 }
 
 function isPodcastDirty(podcast: PodcastEntry) {
@@ -176,78 +300,116 @@ function isEpisodeDirty(episode: Episode) {
   return savedEpisodeSnapshots.value[episode.id] !== getEpisodeSnapshot(episode);
 }
 
-function saveProfile() {
-  savedProfileSnapshot.value = getProfileSnapshot();
-  showToast("Profile saved");
-  console.info("save:profile", { name: profile.name, email: profile.email });
+async function saveProfile() {
+  const document = await withBackend(
+    () =>
+      apiRequest<AppDocument>("/api/profile", {
+        method: "PUT",
+        body: JSON.stringify({ name: profile.name, email: profile.email }),
+      }),
+    "Profile saved",
+  );
+  if (document) applyDocument(document);
 }
 
-function savePodcast(podcast: PodcastEntry) {
-  savedPodcastSnapshots.value[podcast.id] = getPodcastSnapshot(podcast);
-  showToast("Podcast saved");
-  console.info("save:podcast", { id: podcast.id, data: podcast.data });
+async function savePodcast(podcast: PodcastEntry) {
+  const saved = await withBackend(
+    () =>
+      apiRequest<PodcastEntry>(`/api/podcasts/${podcast.id}`, {
+        method: "PUT",
+        body: JSON.stringify(cleanPodcastData(podcast.data)),
+      }),
+    "Podcast saved",
+  );
+  if (saved) replacePodcast(saved);
+  return saved;
 }
 
-function saveEpisode(podcastId: string, episode: Episode) {
-  savedEpisodeSnapshots.value[episode.id] = getEpisodeSnapshot(episode);
-  showToast("Episode saved");
-  console.info("save:episode", { podcastId, episode });
+async function saveEpisode(podcastId: string, episode: Episode) {
+  const saved = await withBackend(
+    () =>
+      apiRequest<Episode>(`/api/podcasts/${podcastId}/episodes/${episode.id}`, {
+        method: "PUT",
+        body: JSON.stringify(cleanEpisode(episode)),
+      }),
+    "Episode saved",
+  );
+
+  const podcast = podcasts.value.find((item) => item.id === podcastId);
+  if (!saved || !podcast) return;
+
+  const index = podcast.episodes.findIndex((item) => item.id === saved.id);
+  if (index !== -1) podcast.episodes[index] = saved;
+  savedEpisodeSnapshots.value[saved.id] = getEpisodeSnapshot(saved);
+  return saved;
 }
 
-function addPodcast() {
-  const podcast = initialPodcast();
-  podcasts.value.push(podcast);
-  expanded.value[podcast.id] = true;
+async function addPodcast() {
+  const podcast = await withBackend(
+    () =>
+      apiRequest<PodcastEntry>("/api/podcasts", {
+        method: "POST",
+        body: JSON.stringify({ data: emptyPodcast() }),
+      }),
+    "Podcast created",
+  );
+  if (!podcast) return;
+
+  replacePodcast(podcast);
   selection.value = { kind: "podcast", podcastId: podcast.id };
 }
 
-function addEpisode(podcastId: string) {
+async function addEpisode(podcastId: string) {
   const podcast = podcasts.value.find((item) => item.id === podcastId);
   if (!podcast) return;
 
-  const episode = emptyEpisode(podcast.episodes.length + 1);
+  const episode = await withBackend(
+    () =>
+      apiRequest<Episode>(`/api/podcasts/${podcastId}/episodes`, {
+        method: "POST",
+        body: JSON.stringify({ episode: null }),
+      }),
+    "Episode created",
+  );
+  if (!episode) return;
+
   podcast.episodes.push(episode);
+  savedEpisodeSnapshots.value[episode.id] = getEpisodeSnapshot(episode);
   expanded.value[podcastId] = true;
   selection.value = { kind: "episode", podcastId, episodeId: episode.id };
 }
 
-function removePodcast(podcastId: string) {
+async function removePodcast(podcastId: string) {
   const podcastIndex = podcasts.value.findIndex((podcast) => podcast.id === podcastId);
-  const podcast = podcasts.value[podcastIndex];
-  if (!podcast) return;
+  const document = await withBackend(
+    () =>
+      apiRequest<AppDocument>(`/api/podcasts/${podcastId}`, {
+        method: "DELETE",
+      }),
+    "Podcast deleted",
+  );
+  if (!document) return;
 
-  podcasts.value.splice(podcastIndex, 1);
-  delete expanded.value[podcastId];
-  delete savedPodcastSnapshots.value[podcastId];
-  for (const episode of podcast.episodes) {
-    delete savedEpisodeSnapshots.value[episode.id];
-  }
-
-  if (youtubeFor.value === podcastId) {
-    youtubeFor.value = null;
-  }
-
-  const nextPodcast = podcasts.value[podcastIndex] ?? podcasts.value[podcastIndex - 1] ?? null;
-  selection.value = nextPodcast ? { kind: "podcast", podcastId: nextPodcast.id } : null;
-  showToast("Podcast deleted");
-  console.info("delete:podcast", { id: podcastId });
+  const nextPodcast = document.podcasts[podcastIndex] ?? document.podcasts[podcastIndex - 1] ?? null;
+  if (youtubeFor.value === podcastId) youtubeFor.value = null;
+  applyDocument(document, nextPodcast ? { kind: "podcast", podcastId: nextPodcast.id } : null);
 }
 
-function removeEpisode(podcastId: string, episodeId: string) {
-  const podcast = podcasts.value.find((item) => item.id === podcastId);
+async function removeEpisode(podcastId: string, episodeId: string) {
+  const podcast = await withBackend(
+    () =>
+      apiRequest<PodcastEntry>(`/api/podcasts/${podcastId}/episodes/${episodeId}`, {
+        method: "DELETE",
+      }),
+    "Episode deleted",
+  );
   if (!podcast) return;
 
-  podcast.episodes = podcast.episodes
-    .filter((episode) => episode.id !== episodeId)
-    .map((episode, index) => ({ ...episode, number: index + 1 }));
+  replacePodcast(podcast);
   delete savedEpisodeSnapshots.value[episodeId];
-
   if (selection.value?.kind === "episode" && selection.value.episodeId === episodeId) {
     selection.value = { kind: "podcast", podcastId };
   }
-
-  showToast("Episode deleted");
-  console.info("delete:episode", { podcastId, episodeId });
 }
 
 function toggleExpanded(podcastId: string) {
@@ -301,7 +463,7 @@ function getInputFile(event: Event) {
   return file;
 }
 
-function handleCoverUpload(event: Event, target: "podcast" | "episode") {
+async function handleCoverUpload(event: Event, target: "podcast" | "episode") {
   const file = getInputFile(event);
   coverError.value = "";
   if (!file) return;
@@ -316,16 +478,34 @@ function handleCoverUpload(event: Event, target: "podcast" | "episode") {
     return;
   }
 
-  const reader = new FileReader();
-  reader.onload = () => {
-    if (target === "podcast" && selectedPodcast.value) {
-      selectedPodcast.value.data.cover = String(reader.result);
+  if (target === "podcast" && selectedPodcast.value) {
+    const podcast = selectedPodcast.value;
+    if (isPodcastDirty(podcast)) {
+      const saved = await savePodcast(podcast);
+      if (!saved) return;
     }
-    if (target === "episode" && selectedEpisode.value) {
-      selectedEpisode.value.cover = String(reader.result);
+
+    const uploaded = await withBackend(
+      () => uploadFile<PodcastEntry>(`/api/podcasts/${podcast.id}/cover`, file),
+      "Podcast cover uploaded",
+    );
+    if (uploaded) replacePodcast(uploaded);
+  }
+
+  if (target === "episode" && selectedPodcast.value && selectedEpisode.value) {
+    const podcastId = selectedPodcast.value.id;
+    const episode = selectedEpisode.value;
+    if (isEpisodeDirty(episode)) {
+      const saved = await saveEpisode(podcastId, episode);
+      if (!saved) return;
     }
-  };
-  reader.readAsDataURL(file);
+
+    const uploaded = await withBackend(
+      () => uploadFile<Episode>(`/api/podcasts/${podcastId}/episodes/${episode.id}/cover`, file),
+      "Episode cover uploaded",
+    );
+    if (uploaded) replaceEpisode(podcastId, uploaded);
+  }
 }
 
 function clearCover(target: "podcast" | "episode") {
@@ -337,10 +517,10 @@ function clearCover(target: "podcast" | "episode") {
   }
 }
 
-function handleAudioUpload(event: Event) {
+async function handleAudioUpload(event: Event) {
   const file = getInputFile(event);
   audioError.value = "";
-  if (!file || !selectedEpisode.value) return;
+  if (!file || !selectedPodcast.value || !selectedEpisode.value) return;
 
   const extension = file.name.split(".").pop()?.toLowerCase() ?? "";
   if (!audioExt.includes(extension)) {
@@ -353,8 +533,18 @@ function handleAudioUpload(event: Event) {
     return;
   }
 
-  selectedEpisode.value.audioFileName = file.name;
-  selectedEpisode.value.audioSize = file.size;
+  const podcastId = selectedPodcast.value.id;
+  const episode = selectedEpisode.value;
+  if (isEpisodeDirty(episode)) {
+    const saved = await saveEpisode(podcastId, episode);
+    if (!saved) return;
+  }
+
+  const uploaded = await withBackend(
+    () => uploadFile<Episode>(`/api/podcasts/${podcastId}/episodes/${episode.id}/audio`, file),
+    "Episode audio uploaded",
+  );
+  if (uploaded) replaceEpisode(podcastId, uploaded);
 }
 
 function formatSize(bytes: number) {
@@ -362,6 +552,38 @@ function formatSize(bytes: number) {
   if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
 }
+
+function mediaUrl(value: string | null) {
+  if (!value) return "";
+  if (value.startsWith("http://") || value.startsWith("https://") || value.startsWith("data:")) {
+    return value;
+  }
+  if (value.startsWith("/")) {
+    return `${apiBase}${value}`;
+  }
+  return value;
+}
+
+function cleanPodcastData(data: PodcastData): PodcastData {
+  return {
+    ...data,
+    cover: cleanStoredMedia(data.cover),
+  };
+}
+
+function cleanEpisode(episode: Episode): Episode {
+  return {
+    ...episode,
+    cover: cleanStoredMedia(episode.cover),
+  };
+}
+
+function cleanStoredMedia(value: string | null) {
+  if (!value || value.startsWith("data:") || value.startsWith("blob:")) return null;
+  return value;
+}
+
+onMounted(loadState);
 </script>
 
 <template>
@@ -389,7 +611,7 @@ function formatSize(bytes: number) {
         <button
           class="button save-button"
           type="button"
-          :disabled="!profileDirty"
+          :disabled="isLoading || isSaving || !profileDirty"
           @click="saveProfile"
         >
           Save profile
@@ -401,7 +623,7 @@ function formatSize(bytes: number) {
       <aside class="sidebar" aria-label="Podcasts">
         <div class="sidebar-head">
           <strong>Podcasts</strong>
-          <button class="button ghost small" type="button" @click="addPodcast">
+          <button class="button ghost small" type="button" :disabled="isLoading || isSaving" @click="addPodcast">
             <span aria-hidden="true">+</span>
             New
           </button>
@@ -425,6 +647,7 @@ function formatSize(bytes: number) {
                 class="icon-button add-inline"
                 type="button"
                 title="Add episode"
+                :disabled="isSaving"
                 @click="addEpisode(podcast.id)"
               >
                 +
@@ -433,6 +656,7 @@ function formatSize(bytes: number) {
                 class="icon-button danger add-inline"
                 type="button"
                 title="Delete podcast"
+                :disabled="isSaving"
                 @click="removePodcast(podcast.id)"
               >
                 x
@@ -460,12 +684,18 @@ function formatSize(bytes: number) {
                   class="icon-button danger add-inline"
                   type="button"
                   title="Delete episode"
+                  :disabled="isSaving"
                   @click="removeEpisode(podcast.id, episode.id)"
                 >
                   x
                 </button>
               </div>
-              <button class="episode-link muted" type="button" @click="addEpisode(podcast.id)">
+              <button
+                class="episode-link muted"
+                type="button"
+                :disabled="isSaving"
+                @click="addEpisode(podcast.id)"
+              >
                 <span aria-hidden="true">+</span>
                 Add episode
               </button>
@@ -475,13 +705,18 @@ function formatSize(bytes: number) {
       </aside>
 
       <main class="content">
-        <section v-if="!selectedPodcast" class="panel empty-panel">
-          <h2>No podcast selected</h2>
-          <p>Create a new podcast from the sidebar to start editing.</p>
-          <button class="button" type="button" @click="addPodcast">New podcast</button>
+        <section v-if="isLoading" class="panel empty-panel">
+          <h2>Loading backend state</h2>
+          <p>Connecting to {{ apiBase }}.</p>
         </section>
 
-        <section v-if="selectedPodcast && !selectedEpisode" class="panel">
+        <section v-else-if="!selectedPodcast" class="panel empty-panel">
+          <h2>No podcast selected</h2>
+          <p>Create a new podcast from the sidebar to start editing.</p>
+          <button class="button" type="button" :disabled="isSaving" @click="addPodcast">New podcast</button>
+        </section>
+
+        <section v-if="!isLoading && selectedPodcast && !selectedEpisode" class="panel">
           <div class="panel-head">
             <div>
               <h2>Podcast details</h2>
@@ -493,7 +728,7 @@ function formatSize(bytes: number) {
               <button
                 class="button save-button small"
                 type="button"
-                :disabled="!selectedPodcastDirty"
+                :disabled="isSaving || !selectedPodcastDirty"
                 @click="savePodcast(selectedPodcast)"
               >
                 Save podcast
@@ -509,6 +744,7 @@ function formatSize(bytes: number) {
               <button
                 class="button danger-outline small"
                 type="button"
+                :disabled="isSaving"
                 @click="removePodcast(selectedPodcast.id)"
               >
                 Delete podcast
@@ -551,7 +787,7 @@ function formatSize(bytes: number) {
 
           <section class="upload-row">
             <div class="cover-preview">
-              <img v-if="selectedPodcast.data.cover" :src="selectedPodcast.data.cover" alt="Podcast cover" />
+              <img v-if="selectedPodcast.data.cover" :src="mediaUrl(selectedPodcast.data.cover)" alt="Podcast cover" />
               <span v-else aria-hidden="true">[]</span>
               <button
                 v-if="selectedPodcast.data.cover"
@@ -621,7 +857,7 @@ function formatSize(bytes: number) {
           </div>
         </section>
 
-        <section v-if="selectedPodcast && selectedEpisode" class="panel">
+        <section v-if="!isLoading && selectedPodcast && selectedEpisode" class="panel">
           <div class="panel-head">
             <div>
               <h2>Episode {{ selectedEpisode.number }}</h2>
@@ -633,7 +869,7 @@ function formatSize(bytes: number) {
               <button
                 class="button save-button small"
                 type="button"
-                :disabled="!selectedEpisodeDirty"
+                :disabled="isSaving || !selectedEpisodeDirty"
                 @click="saveEpisode(selectedPodcast.id, selectedEpisode)"
               >
                 Save episode
@@ -641,6 +877,7 @@ function formatSize(bytes: number) {
               <button
                 class="button danger-outline small"
                 type="button"
+                :disabled="isSaving"
                 @click="removeEpisode(selectedPodcast.id, selectedEpisode.id)"
               >
                 Delete episode
@@ -688,7 +925,7 @@ function formatSize(bytes: number) {
 
           <section class="upload-row">
             <div class="cover-preview">
-              <img v-if="selectedEpisode.cover" :src="selectedEpisode.cover" alt="Episode cover" />
+              <img v-if="selectedEpisode.cover" :src="mediaUrl(selectedEpisode.cover)" alt="Episode cover" />
               <span v-else aria-hidden="true">[]</span>
               <button
                 v-if="selectedEpisode.cover"

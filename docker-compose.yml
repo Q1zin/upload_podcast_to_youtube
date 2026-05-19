@@ -6,11 +6,14 @@ services:
     environment:
       PODCAST_BACKEND_ADDR: 0.0.0.0:8787
       PODCAST_BACKEND_DATA: /app/data/app_state.json
+      PODCAST_BACKEND_RESOURCES: /app/resurs
+      PODCAST_PUBLIC_BASE_URL: http://127.0.0.1:8787
       RUST_LOG: podcast_backend=info,tower_http=info
     ports:
       - "8787:8787"
     volumes:
       - podcast_backend_data:/app/data
+      - podcast_backend_resources:/app/resurs
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8787/health"]
       interval: 10s
@@ -21,3 +24,4 @@ services:
 
 volumes:
   podcast_backend_data:
+  podcast_backend_resources:
