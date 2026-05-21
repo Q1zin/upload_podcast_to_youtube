@@ -209,7 +209,12 @@ where
 }
 
 fn handle_show(req: &Request) -> CmdResult {
-    with_window(req, |window| window.show())
+    with_window(req, |window| {
+        // Re-center on every show so the window appears in the middle of the user's
+        // current display (handles monitor changes between sessions).
+        window.center_window(Some(&Size { width: 1024, height: 768 }));
+        window.show();
+    })
 }
 
 fn handle_hide(req: &Request) -> CmdResult {
