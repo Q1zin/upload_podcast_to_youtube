@@ -13,8 +13,8 @@
     "windows": [
       {
         "title": "upload_podcast_with_cef",
-        "width": 800,
-        "height": 600
+        "width": 1400,
+        "height": 900
       }
     ],
     "security": {
@@ -30,6 +30,9 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "macOS": {
+      "exceptionDomain": "31.130.132.238"
+    }
   }
 }

@@ -477,6 +477,9 @@ async function copyRss() {
 }
 
 const YT_MUSIC_LIBRARY_URL = "https://music.youtube.com/library/podcasts";
+const GOOGLE_SIGNIN_URL =
+  "https://accounts.google.com/ServiceLogin?service=youtube&continue=" +
+  encodeURIComponent(YT_MUSIC_LIBRARY_URL);
 
 type CefEventPayload = { browser_id?: number; [key: string]: unknown };
 type JsCallback = { browser_id?: number; payload: { tag: string; ok?: unknown; err?: string } };
@@ -701,7 +704,9 @@ async function publishToYoutubeMusic() {
     let loggedIn = (await runQuery(open.browser_id, CHECK_LOGIN_SCRIPT)) as boolean;
 
     if (!loggedIn) {
-      // Reveal the CEF window so the user can complete Google sign-in.
+      // Jump straight to Google sign-in with a continue= back to YT Music — saves the
+      // user a click hunting for the "Sign in" button on the YT Music page.
+      await invoke("cef_navigate", { browserId: open.browser_id, url: GOOGLE_SIGNIN_URL });
       await invoke("cef_show", { browserId: open.browser_id });
       youtubeStage.value = "awaiting-login";
       youtubeMessage.value = "Sign in to Google in the opened window, then this will continue";
