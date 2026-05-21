@@ -1,0 +1,38 @@
+[package]
+name = "cef-host"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["rlib"]
+
+[[bin]]
+name = "cef-host"
+path = "src/main.rs"
+
+[[bin]]
+name = "cef_host_helper"
+path = "src/bin/cef_host_helper.rs"
+
+[features]
+default = []
+
+[package.metadata.cef.bundle]
+helper_name = "cef_host_helper"
+
+[dependencies]
+cef = { path = "/Users/q1zin/cef-rs/cef", default-features = false, features = ["build-util"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6.3"
+objc2-foundation = "0.3.2"
+objc2-app-kit = { version = "0.3.2", default-features = false, features = [
+    "NSApplication",
+    "NSEvent",
+    "NSResponder",
+    "NSUserInterfaceValidation",
+    "NSView",
+    "NSWindow",
+] }

@@ -29,6 +29,8 @@ services:
       RUST_LOG: ${RUST_LOG:-podcast_backend=info,tower_http=info}
     expose:
       - "8787"
+    ports:
+      - "127.0.0.1:8787:8787"
     volumes:
       - podcast_backend_data:/app/data
       - podcast_backend_resources:/app/resurs

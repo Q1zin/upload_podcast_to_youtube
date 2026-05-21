@@ -1,5 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from "vue";
+import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 type PodcastData = {
   title: string;
@@ -98,6 +100,18 @@ const podcasts = ref<PodcastEntry[]>([]);
 const selection = ref<Selection | null>(null);
 const expanded = ref<Record<string, boolean>>({});
 const youtubeFor = ref<string | null>(null);
+type YoutubeStage =
+  | "idle"
+  | "opening"
+  | "loading"
+  | "checking-login"
+  | "awaiting-login"
+  | "adding"
+  | "done"
+  | "error";
+const youtubeStage = ref<YoutubeStage>("idle");
+const youtubeMessage = ref("");
+const youtubeBrowserId = ref<number | null>(null);
 const toast = ref("");
 const coverError = ref("");
 const audioError = ref("");
@@ -460,6 +474,272 @@ async function copyRss() {
   } catch {
     showToast("Failed to copy RSS URL");
   }
+}
+
+const YT_MUSIC_LIBRARY_URL = "https://music.youtube.com/library/podcasts";
+
+type CefEventPayload = { browser_id?: number; [key: string]: unknown };
+type JsCallback = { browser_id?: number; payload: { tag: string; ok?: unknown; err?: string } };
+
+const pendingJsCallbacks = new Map<string, (cb: JsCallback) => void>();
+let cefListenersUnlisten: UnlistenFn[] = [];
+let loadEndListeners: Array<(payload: CefEventPayload) => void> = [];
+
+async function setupCefListeners() {
+  if (cefListenersUnlisten.length > 0) return;
+  const unlistenLoad = await listen<CefEventPayload>("cef://load_end", (e) => {
+    const payload = e.payload;
+    for (const listener of loadEndListeners) listener(payload);
+  });
+  const unlistenJs = await listen<JsCallback>("cef://js_callback", (e) => {
+    const payload = e.payload;
+    const tag = payload.payload?.tag;
+    if (!tag) return;
+    const resolver = pendingJsCallbacks.get(tag);
+    if (resolver) {
+      pendingJsCallbacks.delete(tag);
+      resolver(payload);
+    }
+  });
+  cefListenersUnlisten.push(unlistenLoad, unlistenJs);
+}
+
+function waitForLoadEnd(browserId: number, urlMatch?: (url: string) => boolean, timeoutMs = 30000) {
+  return new Promise<{ url: string; http_status: number }>((resolve, reject) => {
+    const timer = window.setTimeout(() => {
+      loadEndListeners = loadEndListeners.filter((l) => l !== listener);
+      reject(new Error("load_end timeout"));
+    }, timeoutMs);
+    const listener = (payload: CefEventPayload) => {
+      if (payload.browser_id !== browserId) return;
+      const url = String(payload.url ?? "");
+      if (urlMatch && !urlMatch(url)) return;
+      loadEndListeners = loadEndListeners.filter((l) => l !== listener);
+      window.clearTimeout(timer);
+      resolve({ url, http_status: Number(payload.http_status ?? 0) });
+    };
+    loadEndListeners.push(listener);
+  });
+}
+
+async function runQuery(browserId: number, code: string, timeoutMs = 30000): Promise<unknown> {
+  const tag = `q-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const promise = new Promise<JsCallback>((resolve, reject) => {
+    const timer = window.setTimeout(() => {
+      pendingJsCallbacks.delete(tag);
+      reject(new Error("js_callback timeout"));
+    }, timeoutMs);
+    pendingJsCallbacks.set(tag, (cb) => {
+      window.clearTimeout(timer);
+      resolve(cb);
+    });
+  });
+  await invoke("cef_query", { browserId, code, tag });
+  const result = await promise;
+  if (result.payload?.err) throw new Error(result.payload.err);
+  return result.payload?.ok ?? null;
+}
+
+// Reliable login signal: YT exposes LOGGED_IN in ytcfg, and SAPISID cookie is required
+// to call any authenticated endpoint. If either is missing, the user is not signed in.
+const CHECK_LOGIN_SCRIPT = `
+  const yt = window.ytcfg;
+  if (yt && yt.get && yt.get('LOGGED_IN') === true) return true;
+  // Fallback to cookie presence (SAPISID is set on signed-in YouTube accounts).
+  return /(?:^|;\\s*)(?:SAPISID|__Secure-3PAPISID)=/.test(document.cookie);
+`;
+
+// Installed once per page after load_end. Hooks fetch + XMLHttpRequest to capture
+// the Authorization header from any YT-initiated request — so we don't have to
+// reverse-engineer the SAPISIDHASH `_u` salt ourselves.
+const INSTALL_AUTH_HOOK_SCRIPT = `
+  if (!window.__cefAuthHookInstalled) {
+    window.__cefAuthHookInstalled = true;
+    window.__cefCapturedAuth = null;
+    window.__cefCapturedClientName = null;
+    window.__cefCapturedClientVersion = null;
+    function capture(headers) {
+      try {
+        const a = headers.get ? headers.get('authorization') : (headers.authorization || headers.Authorization);
+        if (a && /SAPISIDHASH/.test(a)) window.__cefCapturedAuth = a;
+        const cn = headers.get ? headers.get('x-youtube-client-name') : null;
+        const cv = headers.get ? headers.get('x-youtube-client-version') : null;
+        if (cn) window.__cefCapturedClientName = cn;
+        if (cv) window.__cefCapturedClientVersion = cv;
+      } catch (e) {}
+    }
+    const origFetch = window.fetch.bind(window);
+    window.fetch = function(input, init) {
+      try {
+        if (init && init.headers) capture(new Headers(init.headers));
+        else if (input && input.headers && input.headers.get) capture(input.headers);
+      } catch (e) {}
+      return origFetch(input, init);
+    };
+    const origSet = XMLHttpRequest.prototype.setRequestHeader;
+    XMLHttpRequest.prototype.setRequestHeader = function(name, value) {
+      try {
+        const lname = String(name).toLowerCase();
+        if (lname === 'authorization' && /SAPISIDHASH/.test(String(value))) {
+          window.__cefCapturedAuth = String(value);
+        } else if (lname === 'x-youtube-client-name') {
+          window.__cefCapturedClientName = String(value);
+        } else if (lname === 'x-youtube-client-version') {
+          window.__cefCapturedClientVersion = String(value);
+        }
+      } catch (e) {}
+      return origSet.apply(this, arguments);
+    };
+  }
+  return true;
+`;
+
+// Add RSS via direct /youtubei/v1/flow POST, using the auth header captured from
+// YT's own fetch traffic.
+const ADD_RSS_SCRIPT = (rssUrl: string) => `
+  async function waitForAuth(timeoutMs) {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      if (window.__cefCapturedAuth) return window.__cefCapturedAuth;
+      // Nudge YT into making a request — focus / visibility / scroll events
+      // commonly trigger their background telemetry pings.
+      window.dispatchEvent(new Event('focus'));
+      document.dispatchEvent(new Event('visibilitychange'));
+      window.dispatchEvent(new Event('scroll'));
+      await new Promise(r => setTimeout(r, 250));
+    }
+    return null;
+  }
+
+  if (!window.__cefAuthHookInstalled) {
+    throw new Error('Auth hook was not installed; reload the page');
+  }
+  const auth = await waitForAuth(15000);
+  if (!auth) throw new Error('Could not capture an Authorization header within 15s');
+
+  const yt = window.ytcfg;
+  if (!yt || !yt.get) throw new Error('ytcfg unavailable');
+  const ctx = yt.get('INNERTUBE_CONTEXT') || {};
+  const client = ctx.client || {};
+  const visitorId = client.visitorData || yt.get('VISITOR_DATA') || '';
+  const clientVersion = window.__cefCapturedClientVersion || client.clientVersion || yt.get('INNERTUBE_CLIENT_VERSION');
+  const clientName = client.clientName || yt.get('INNERTUBE_CLIENT_NAME_STRING') || 'WEB_REMIX';
+  const clientNumeric = window.__cefCapturedClientName || String(yt.get('INNERTUBE_CONTEXT_CLIENT_NAME') || 67);
+  const origin = 'https://music.youtube.com';
+
+  const body = {
+    context: {
+      client: {
+        clientName: clientName,
+        clientVersion: clientVersion,
+        hl: client.hl || 'en',
+        gl: client.gl || 'US',
+        visitorData: visitorId,
+        originalUrl: origin + '/library/podcasts',
+        platform: 'DESKTOP',
+      },
+      user: ctx.user || { lockedSafetyMode: false },
+      request: { useSsl: true, internalExperimentFlags: [] },
+    },
+    flowId: 'FEmusic_podcasts_add_by_url',
+    targetId: 'add-by-url-target-id',
+    flowState: {
+      currentStepId: 'add_by_url-step1',
+      addPodcastByUrlFlowState: { rssFeedUrl: ${JSON.stringify(rssUrl)} },
+    },
+    flowStateEntityKey: 'Eh9hZGQtYnktdXJsLWZsb3ctc3RhdGUtZW50aXR5LWlkIPwBKAE%3D',
+  };
+
+  const r = await fetch(origin + '/youtubei/v1/flow?prettyPrint=false', {
+    method: 'POST',
+    credentials: 'include',
+    headers: {
+      'authorization': auth,
+      'content-type': 'application/json',
+      'x-origin': origin,
+      'x-goog-authuser': '0',
+      'x-goog-visitor-id': visitorId,
+      'x-youtube-client-name': clientNumeric,
+      'x-youtube-client-version': clientVersion,
+    },
+    body: JSON.stringify(body),
+  });
+  const data = await r.json().catch(() => null);
+  if (!r.ok) {
+    throw new Error('HTTP ' + r.status + ' authPrefix=' + auth.slice(0, 30) + '... body=' + (data ? JSON.stringify(data) : '<no body>'));
+  }
+  const toast =
+    data && data.updateFlowCommand &&
+    data.updateFlowCommand.addToToastAction &&
+    data.updateFlowCommand.addToToastAction.item &&
+    data.updateFlowCommand.addToToastAction.item.notificationActionRenderer &&
+    data.updateFlowCommand.addToToastAction.item.notificationActionRenderer.responseText &&
+    data.updateFlowCommand.addToToastAction.item.notificationActionRenderer.responseText.runs;
+  return { status: r.status, toast: toast ? toast.map(r => r.text).join('') : null };
+`;
+
+async function publishToYoutubeMusic() {
+  const rss = rssUrl.value;
+  if (!rss) {
+    showToast("Set the podcast feed slug first");
+    return;
+  }
+  try {
+    await setupCefListeners();
+
+    youtubeStage.value = "opening";
+    youtubeMessage.value = "Launching browser";
+    const open = await invoke<{ browser_id: number }>("cef_open", { url: YT_MUSIC_LIBRARY_URL });
+    youtubeBrowserId.value = open.browser_id;
+
+    youtubeStage.value = "loading";
+    youtubeMessage.value = "Loading YouTube Music";
+    await waitForLoadEnd(open.browser_id, (url) => url.includes("music.youtube.com"));
+    await runQuery(open.browser_id, INSTALL_AUTH_HOOK_SCRIPT);
+
+    youtubeStage.value = "checking-login";
+    youtubeMessage.value = "Checking login";
+    let loggedIn = (await runQuery(open.browser_id, CHECK_LOGIN_SCRIPT)) as boolean;
+
+    if (!loggedIn) {
+      youtubeStage.value = "awaiting-login";
+      youtubeMessage.value = "Sign in to Google in the opened window, then this will continue";
+      while (!loggedIn) {
+        await new Promise((r) => window.setTimeout(r, 2000));
+        try {
+          loggedIn = (await runQuery(open.browser_id, CHECK_LOGIN_SCRIPT, 5000)) as boolean;
+        } catch {
+          /* retry */
+        }
+      }
+    }
+
+    youtubeStage.value = "adding";
+    youtubeMessage.value = "Adding RSS feed";
+    // Refresh to ensure we're on the library/podcasts page after potential signin redirects.
+    await invoke("cef_navigate", { browserId: open.browser_id, url: YT_MUSIC_LIBRARY_URL });
+    await waitForLoadEnd(open.browser_id, (url) => url.includes("/library/podcasts"));
+    await runQuery(open.browser_id, INSTALL_AUTH_HOOK_SCRIPT);
+    await runQuery(open.browser_id, ADD_RSS_SCRIPT(rss), 30000);
+
+    youtubeStage.value = "done";
+    youtubeMessage.value = "Podcast added — verify in the YouTube Music window";
+    showToast("RSS submitted to YouTube Music");
+  } catch (err) {
+    youtubeStage.value = "error";
+    youtubeMessage.value = err instanceof Error ? err.message : String(err);
+    showToast(youtubeMessage.value);
+  }
+}
+
+function closeYoutubePanel() {
+  if (youtubeBrowserId.value != null) {
+    invoke("cef_close", { browserId: youtubeBrowserId.value }).catch(() => {});
+    youtubeBrowserId.value = null;
+  }
+  youtubeFor.value = null;
+  youtubeStage.value = "idle";
+  youtubeMessage.value = "";
 }
 
 function getInputFile(event: Event) {
@@ -959,16 +1239,28 @@ onMounted(loadState);
       <aside v-if="youtubePodcast" class="youtube-panel">
         <div class="sidebar-head">
           <strong><span class="youtube-mark" aria-hidden="true">></span> Publish to YouTube</strong>
-          <button class="icon-button" type="button" @click="youtubeFor = null">x</button>
+          <button class="icon-button" type="button" @click="closeYoutubePanel">x</button>
         </div>
         <div class="youtube-empty">
           <span class="youtube-big" aria-hidden="true">></span>
           <p>
-            YouTube publish window for
+            Publishing
             <strong>{{ youtubePodcast.data.title || "this podcast" }}</strong>
-            will open here.
+            to YouTube Music opens a real Chromium window so Google accepts the login.
           </p>
-          <p>Integration coming soon.</p>
+          <p v-if="!rssUrl" class="error">Set a feed slug for this podcast first.</p>
+          <p v-else>RSS: <code>{{ rssUrl }}</code></p>
+          <button
+            class="button"
+            type="button"
+            :disabled="!rssUrl || youtubeStage === 'opening' || youtubeStage === 'loading' || youtubeStage === 'checking-login' || youtubeStage === 'awaiting-login' || youtubeStage === 'adding'"
+            @click="publishToYoutubeMusic"
+          >
+            {{ youtubeStage === "done" ? "Run again" : "Publish to YouTube Music" }}
+          </button>
+          <p v-if="youtubeStage !== 'idle'" :class="{ error: youtubeStage === 'error' }">
+            <strong>{{ youtubeStage }}</strong> — {{ youtubeMessage }}
+          </p>
         </div>
       </aside>
     </div>
