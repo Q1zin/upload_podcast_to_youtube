@@ -44,6 +44,7 @@ fn handle_request(req: &Request) {
         "query" => handle_query(req),
         "show" => handle_show(req),
         "hide" => handle_hide(req),
+        "dev_tools" => handle_dev_tools(req),
         "close" => handle_close(req),
         "shutdown" => handle_shutdown(req),
         other => Err(format!("unknown method: {other}")),
@@ -219,6 +220,26 @@ fn handle_show(req: &Request) -> CmdResult {
 
 fn handle_hide(req: &Request) -> CmdResult {
     with_window(req, |window| window.hide())
+}
+
+fn handle_dev_tools(req: &Request) -> CmdResult {
+    let browser_id = req
+        .params
+        .get("browser_id")
+        .and_then(|v| v.as_u64())
+        .ok_or("missing 'browser_id'")? as u32;
+
+    let host = {
+        let state = host_state();
+        let state = state.lock().expect("host state lock");
+        let browser = state
+            .browsers
+            .get(&browser_id)
+            .ok_or_else(|| format!("no browser with id {browser_id}"))?;
+        browser.host().ok_or("no browser host")?
+    };
+    host.show_dev_tools(None, None, None, None);
+    Ok(Some(json!({})))
 }
 
 fn handle_close(req: &Request) -> CmdResult {

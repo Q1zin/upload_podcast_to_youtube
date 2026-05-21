@@ -14,6 +14,7 @@ pub fn run() {
             cef::cef_query,
             cef::cef_show,
             cef::cef_hide,
+            cef::cef_dev_tools,
             cef::cef_close,
             cef::cef_shutdown,
         ])

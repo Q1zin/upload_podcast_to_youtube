@@ -205,9 +205,15 @@ pub async fn get_or_start(app: &AppHandle) -> Result<Arc<CefSidecar>, String> {
 // ---------------------------------------------------------------------------
 
 #[tauri::command]
-pub async fn cef_open(app: AppHandle, url: String) -> Result<Value, String> {
+pub async fn cef_open(
+    app: AppHandle,
+    url: String,
+    visible: Option<bool>,
+) -> Result<Value, String> {
     let sidecar = get_or_start(&app).await?;
-    sidecar.call("open", json!({ "url": url })).await
+    sidecar
+        .call("open", json!({ "url": url, "visible": visible.unwrap_or(false) }))
+        .await
 }
 
 #[tauri::command]
@@ -260,6 +266,14 @@ pub async fn cef_show(app: AppHandle, browser_id: u64) -> Result<Value, String> 
 pub async fn cef_hide(app: AppHandle, browser_id: u64) -> Result<Value, String> {
     let sidecar = get_or_start(&app).await?;
     sidecar.call("hide", json!({ "browser_id": browser_id })).await
+}
+
+#[tauri::command]
+pub async fn cef_dev_tools(app: AppHandle, browser_id: u64) -> Result<Value, String> {
+    let sidecar = get_or_start(&app).await?;
+    sidecar
+        .call("dev_tools", json!({ "browser_id": browser_id }))
+        .await
 }
 
 #[tauri::command]

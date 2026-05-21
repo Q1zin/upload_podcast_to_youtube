@@ -750,6 +750,19 @@ async function publishToYoutubeMusic() {
   }
 }
 
+async function openDebugWindow() {
+  try {
+    await setupCefListeners();
+    await invoke<{ browser_id: number }>("cef_open", {
+      url: YT_MUSIC_LIBRARY_URL,
+      visible: true,
+    });
+    showToast("CEF window opened");
+  } catch (err) {
+    showToast(err instanceof Error ? err.message : String(err));
+  }
+}
+
 function closeYoutubePanel() {
   if (youtubeBrowserId.value != null) {
     invoke("cef_shutdown").catch(() => {});
@@ -1284,6 +1297,10 @@ onMounted(loadState);
     </div>
 
     <div v-if="toast" class="toast">{{ toast }}</div>
+
+    <button class="debug-fab" type="button" title="Open CEF window with DevTools" @click="openDebugWindow">
+      Debug
+    </button>
   </div>
 </template>
 
@@ -1885,6 +1902,28 @@ button {
   background: #fff0f2;
   color: #d4183d;
   font-size: 28px;
+}
+
+.debug-fab {
+  position: fixed;
+  bottom: 16px;
+  left: 16px;
+  z-index: 10;
+  min-height: 32px;
+  border: 1px solid rgba(15, 15, 20, 0.16);
+  border-radius: 8px;
+  background: #17171c;
+  color: #ffffff;
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  opacity: 0.7;
+  box-shadow: 0 6px 18px rgba(16, 17, 25, 0.18);
+}
+
+.debug-fab:hover {
+  opacity: 1;
+  background: #2a2a32;
 }
 
 .toast {
