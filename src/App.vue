@@ -540,13 +540,12 @@ async function runQuery(browserId: number, code: string, timeoutMs = 30000): Pro
   return result.payload?.ok ?? null;
 }
 
-// Reliable login signal: YT exposes LOGGED_IN in ytcfg, and SAPISID cookie is required
-// to call any authenticated endpoint. If either is missing, the user is not signed in.
+// Login signal: only trust ytcfg.LOGGED_IN. The SAPISID cookie has Domain=.google.com,
+// so it's visible from accounts.google.com mid-signin — we'd falsely think login is done
+// and try to navigate, racing with Google's redirect and hanging the browser.
 const CHECK_LOGIN_SCRIPT = `
   const yt = window.ytcfg;
-  if (yt && yt.get && yt.get('LOGGED_IN') === true) return true;
-  // Fallback to cookie presence (SAPISID is set on signed-in YouTube accounts).
-  return /(?:^|;\\s*)(?:SAPISID|__Secure-3PAPISID)=/.test(document.cookie);
+  return !!(yt && yt.get && yt.get('LOGGED_IN') === true);
 `;
 
 // Installed once per page after load_end. Hooks fetch + XMLHttpRequest to capture
@@ -704,12 +703,21 @@ async function publishToYoutubeMusic() {
     if (!loggedIn) {
       youtubeStage.value = "awaiting-login";
       youtubeMessage.value = "Sign in to Google in the opened window, then this will continue";
+      // Don't poll JS while the user is on accounts.google.com — it can race with
+      // Google's redirects. Wait for load_end events; when one lands back on
+      // music.youtube.com, check ytcfg.LOGGED_IN.
       while (!loggedIn) {
-        await new Promise((r) => window.setTimeout(r, 2000));
+        await waitForLoadEnd(
+          open.browser_id,
+          (url) => /^https?:\/\/music\.youtube\.com\//.test(url),
+          10 * 60_000,
+        );
+        // Give the YT app a moment to initialize ytcfg.
+        await new Promise((r) => window.setTimeout(r, 500));
         try {
           loggedIn = (await runQuery(open.browser_id, CHECK_LOGIN_SCRIPT, 5000)) as boolean;
         } catch {
-          /* retry */
+          /* retry on next load_end */
         }
       }
     }
