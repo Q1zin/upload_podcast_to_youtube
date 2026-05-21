@@ -12,7 +12,7 @@ use tauri::{AppHandle, Emitter, Manager};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     process::{Child, ChildStdin, Command},
-    sync::{Mutex, OnceCell, oneshot},
+    sync::{Mutex, oneshot},
 };
 
 /// Long-lived handle to the cef-host sidecar process. Cloned freely via `Arc`.
@@ -25,8 +25,9 @@ pub struct CefSidecar {
 }
 
 /// Managed by Tauri so commands can lazily start (or reuse) the sidecar.
+/// `Option` so `cef_shutdown` can clear it and the next call respawns a fresh process.
 #[derive(Default)]
-pub struct CefSidecarSlot(pub OnceCell<Arc<CefSidecar>>);
+pub struct CefSidecarSlot(pub Mutex<Option<Arc<CefSidecar>>>);
 
 impl CefSidecar {
     /// Resolve the path to the bundled `cef-host` executable.
@@ -190,12 +191,13 @@ impl CefSidecar {
 /// Lazily start the sidecar (or return the existing one).
 pub async fn get_or_start(app: &AppHandle) -> Result<Arc<CefSidecar>, String> {
     let state = app.state::<CefSidecarSlot>();
-    if let Some(sidecar) = state.0.get() {
+    let mut guard = state.0.lock().await;
+    if let Some(sidecar) = guard.as_ref() {
         return Ok(sidecar.clone());
     }
     let sidecar = CefSidecar::spawn(app).await?;
-    let _ = state.0.set(sidecar.clone());
-    Ok(state.0.get().expect("just set").clone())
+    *guard = Some(sidecar.clone());
+    Ok(sidecar)
 }
 
 // ---------------------------------------------------------------------------
@@ -271,8 +273,16 @@ pub async fn cef_close(app: AppHandle, browser_id: u64) -> Result<Value, String>
 #[tauri::command]
 pub async fn cef_shutdown(app: AppHandle) -> Result<Value, String> {
     let state = app.state::<CefSidecarSlot>();
-    let Some(sidecar) = state.0.get() else {
+    let sidecar_opt = {
+        let mut guard = state.0.lock().await;
+        guard.take()
+    };
+    let Some(sidecar) = sidecar_opt else {
         return Ok(Value::Null);
     };
-    sidecar.call("shutdown", json!({})).await
+    // Best-effort tell the sidecar to quit its message loop. After this returns the
+    // stdout reader sees EOF; dropping the Arc kills the child (kill_on_drop=true).
+    let _ = sidecar.call("shutdown", json!({})).await;
+    drop(sidecar);
+    Ok(Value::Null)
 }

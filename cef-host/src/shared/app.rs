@@ -10,6 +10,23 @@ wrap_app! {
             // HostHandler is a singleton — get_or_init returns the same Arc every time.
             Some(HostBrowserProcessHandler::new(HostHandler::get_or_init()))
         }
+
+        fn on_before_command_line_processing(
+            &self,
+            _process_type: Option<&CefString>,
+            command_line: Option<&mut CommandLine>,
+        ) {
+            let Some(cmd) = command_line else { return };
+            // Disable the macOS Keychain integration to avoid the password prompt for
+            // encrypted-cookie access. With these flags Chromium uses an in-memory mock
+            // keychain and a basic (unencrypted) password store; persistent cookies still
+            // work via our `cache_path`, just without OS-level encryption.
+            cmd.append_switch(Some(&CefString::from("use-mock-keychain")));
+            cmd.append_switch_with_value(
+                Some(&CefString::from("password-store")),
+                Some(&CefString::from("basic")),
+            );
+        }
     }
 }
 

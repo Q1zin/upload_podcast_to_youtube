@@ -734,8 +734,8 @@ async function publishToYoutubeMusic() {
     await runQuery(open.browser_id, INSTALL_AUTH_HOOK_SCRIPT);
     await runQuery(open.browser_id, ADD_RSS_SCRIPT(rss), 30000);
 
-    // Done — close the hidden CEF window.
-    await invoke("cef_close", { browserId: open.browser_id }).catch(() => {});
+    // Done — shut the sidecar down entirely so CEF only runs while needed.
+    await invoke("cef_shutdown").catch(() => {});
     youtubeBrowserId.value = null;
     youtubeStage.value = "done";
     youtubeMessage.value = "Podcast added to YouTube Music";
@@ -744,12 +744,15 @@ async function publishToYoutubeMusic() {
     youtubeStage.value = "error";
     youtubeMessage.value = err instanceof Error ? err.message : String(err);
     showToast(youtubeMessage.value);
+    // On failure also tear the sidecar down so the next attempt starts fresh.
+    await invoke("cef_shutdown").catch(() => {});
+    youtubeBrowserId.value = null;
   }
 }
 
 function closeYoutubePanel() {
   if (youtubeBrowserId.value != null) {
-    invoke("cef_close", { browserId: youtubeBrowserId.value }).catch(() => {});
+    invoke("cef_shutdown").catch(() => {});
     youtubeBrowserId.value = null;
   }
   youtubeFor.value = null;
