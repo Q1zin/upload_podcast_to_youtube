@@ -701,6 +701,8 @@ async function publishToYoutubeMusic() {
     let loggedIn = (await runQuery(open.browser_id, CHECK_LOGIN_SCRIPT)) as boolean;
 
     if (!loggedIn) {
+      // Reveal the CEF window so the user can complete Google sign-in.
+      await invoke("cef_show", { browserId: open.browser_id });
       youtubeStage.value = "awaiting-login";
       youtubeMessage.value = "Sign in to Google in the opened window, then this will continue";
       // Don't poll JS while the user is on accounts.google.com — it can race with
@@ -720,6 +722,8 @@ async function publishToYoutubeMusic() {
           /* retry on next load_end */
         }
       }
+      // Logged in — hide the window again; the rest happens silently.
+      await invoke("cef_hide", { browserId: open.browser_id });
     }
 
     youtubeStage.value = "adding";
@@ -730,8 +734,11 @@ async function publishToYoutubeMusic() {
     await runQuery(open.browser_id, INSTALL_AUTH_HOOK_SCRIPT);
     await runQuery(open.browser_id, ADD_RSS_SCRIPT(rss), 30000);
 
+    // Done — close the hidden CEF window.
+    await invoke("cef_close", { browserId: open.browser_id }).catch(() => {});
+    youtubeBrowserId.value = null;
     youtubeStage.value = "done";
-    youtubeMessage.value = "Podcast added — verify in the YouTube Music window";
+    youtubeMessage.value = "Podcast added to YouTube Music";
     showToast("RSS submitted to YouTube Music");
   } catch (err) {
     youtubeStage.value = "error";

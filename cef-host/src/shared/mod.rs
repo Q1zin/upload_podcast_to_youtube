@@ -3,6 +3,7 @@ pub mod commands;
 pub mod handler;
 pub mod rpc;
 pub mod state;
+pub mod views;
 
 use cef::*;
 

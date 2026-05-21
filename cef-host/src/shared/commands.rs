@@ -2,9 +2,11 @@ use crate::shared::{
     handler::host_client,
     rpc::{Request, write_notification, write_response_err, write_response_ok},
     state::host_state,
+    views::{HostBrowserViewDelegate, HostWindowDelegate},
 };
 use cef::*;
 use serde_json::{Value, json};
+use std::cell::RefCell;
 
 /// Wrap a `Request` into a CEF Task and post it to the UI thread.
 pub fn dispatch_on_ui_thread(request: Request) {
@@ -40,6 +42,8 @@ fn handle_request(req: &Request) {
         "navigate" => handle_navigate(req),
         "eval" => handle_eval(req),
         "query" => handle_query(req),
+        "show" => handle_show(req),
+        "hide" => handle_hide(req),
         "close" => handle_close(req),
         "shutdown" => handle_shutdown(req),
         other => Err(format!("unknown method: {other}")),
@@ -61,6 +65,11 @@ fn handle_open(req: &Request) -> CmdResult {
         .get("url")
         .and_then(|v| v.as_str())
         .ok_or("missing 'url' string param")?;
+    let visible = req
+        .params
+        .get("visible")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
     // Defer the response until on_after_created assigns a browser_id.
     {
@@ -69,22 +78,24 @@ fn handle_open(req: &Request) -> CmdResult {
         state.pending_opens.push_back(req.id);
     }
 
-    let window_info = WindowInfo {
-        runtime_style: RuntimeStyle::CHROME,
-        ..Default::default()
-    };
+    // Views path: a clean BrowserView inside a top-level Window — no tabs / address bar.
     let settings = BrowserSettings::default();
     let url = CefString::from(url);
     let mut client = host_client();
-
-    browser_host_create_browser(
-        Some(&window_info),
+    let mut bv_delegate = HostBrowserViewDelegate::new();
+    let browser_view = browser_view_create(
         Some(&mut client),
         Some(&url),
         Some(&settings),
         None,
         None,
+        Some(&mut bv_delegate),
     );
+
+    let initial_show_state = if visible { ShowState::NORMAL } else { ShowState::HIDDEN };
+    let mut window_delegate =
+        HostWindowDelegate::new(RefCell::new(browser_view), initial_show_state);
+    window_create_top_level(Some(&mut window_delegate));
 
     Ok(None)
 }
@@ -168,6 +179,41 @@ fn handle_query(req: &Request) -> CmdResult {
         Ok(())
     })?;
     Ok(Some(json!({})))
+}
+
+/// Look up the Window for a given browser via the BrowserView, then run an action on it.
+fn with_window<F>(req: &Request, f: F) -> CmdResult
+where
+    F: FnOnce(&Window),
+{
+    let browser_id = req
+        .params
+        .get("browser_id")
+        .and_then(|v| v.as_u64())
+        .ok_or("missing 'browser_id'")? as u32;
+
+    let mut browser = {
+        let state = host_state();
+        let state = state.lock().expect("host state lock");
+        state
+            .browsers
+            .get(&browser_id)
+            .cloned()
+            .ok_or_else(|| format!("no browser with id {browser_id}"))?
+    };
+    let browser_view =
+        browser_view_get_for_browser(Some(&mut browser)).ok_or("no BrowserView for browser")?;
+    let window = browser_view.window().ok_or("no Window for BrowserView")?;
+    f(&window);
+    Ok(Some(json!({})))
+}
+
+fn handle_show(req: &Request) -> CmdResult {
+    with_window(req, |window| window.show())
+}
+
+fn handle_hide(req: &Request) -> CmdResult {
+    with_window(req, |window| window.hide())
 }
 
 fn handle_close(req: &Request) -> CmdResult {

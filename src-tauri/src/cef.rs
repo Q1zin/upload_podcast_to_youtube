@@ -249,6 +249,18 @@ pub async fn cef_query(
 }
 
 #[tauri::command]
+pub async fn cef_show(app: AppHandle, browser_id: u64) -> Result<Value, String> {
+    let sidecar = get_or_start(&app).await?;
+    sidecar.call("show", json!({ "browser_id": browser_id })).await
+}
+
+#[tauri::command]
+pub async fn cef_hide(app: AppHandle, browser_id: u64) -> Result<Value, String> {
+    let sidecar = get_or_start(&app).await?;
+    sidecar.call("hide", json!({ "browser_id": browser_id })).await
+}
+
+#[tauri::command]
 pub async fn cef_close(app: AppHandle, browser_id: u64) -> Result<Value, String> {
     let sidecar = get_or_start(&app).await?;
     sidecar
