@@ -2,6 +2,10 @@
 
 Tauri + Vue frontend and a Rust backend for podcast metadata, uploads, and RSS feeds.
 
+# Demo
+
+https://github.com/user-attachments/assets/66beea7d-2d00-4f83-aa9b-591162001fbc
+
 ## Production Backend
 
 On a clean server:
